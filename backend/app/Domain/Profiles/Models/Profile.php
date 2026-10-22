@@ -2,6 +2,7 @@
 
 namespace App\Domain\Profiles\Models;
 
+use App\Domain\Social\Models\Follow;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -75,5 +76,50 @@ class Profile extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+
+    /**
+     * Whether the given viewer may see this profile under privacy rules.
+     */
+    public function isVisibleTo(?User $viewer): bool
+    {
+        if ($viewer !== null && (int) $viewer->id === (int) $this->user_id) {
+            return true;
+        }
+
+        if ($viewer !== null && $viewer->hasRole('super_admin')) {
+            return true;
+        }
+
+        $visibility = $this->privacy_settings['visibility'] ?? null;
+        if ($visibility === null) {
+            $visibility = $this->is_public ? 'public' : 'private';
+        }
+
+        // Explicit privacy_settings.visibility is authoritative. is_public is the
+        // legacy fallback when visibility is unset — it must not block followers-only.
+        if ($visibility === 'private') {
+            return false;
+        }
+
+        if ($visibility === 'followers') {
+            if ($viewer === null) {
+                return false;
+            }
+
+            $this->loadMissing('user');
+
+            return Follow::query()
+                ->where('follower_id', $viewer->id)
+                ->where('followable_type', $this->user->getMorphClass())
+                ->where('followable_id', $this->user_id)
+                ->exists();
+        }
+
+        if ($visibility === 'public') {
+            return true;
+        }
+
+        return (bool) $this->is_public;
     }
 }

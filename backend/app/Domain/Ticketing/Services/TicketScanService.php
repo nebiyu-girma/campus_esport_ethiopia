@@ -11,6 +11,7 @@ use App\Models\User;
 use Carbon\Carbon;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 class TicketScanService
 {
@@ -48,6 +49,26 @@ class TicketScanService
         $ticketUuid = $payload['ref'];
         $signature = $payload['sig'];
 
+        // PostgreSQL uuid columns reject non-UUID literals (SQLSTATE 22P02).
+        // Treat malformed refs as invalid tickets instead of aborting the request.
+        if (! is_string($ticketUuid) || ! Str::isUuid($ticketUuid)) {
+            return [
+                'success' => false,
+                'status' => 'invalid',
+                'reason' => 'Ticket reference not found in system.',
+                'ticket' => null,
+            ];
+        }
+
+        if (! is_string($signature) || $signature === '') {
+            return [
+                'success' => false,
+                'status' => 'invalid',
+                'reason' => 'Invalid QR code format.',
+                'ticket' => null,
+            ];
+        }
+
         return DB::transaction(function () use ($scanner, $ticketUuid, $signature, $venueId, $eventId, $deviceId, $scannedAtTime) {
             $ticket = Ticket::where('uuid', $ticketUuid)
                 ->with(['ticketType', 'event', 'tournament', 'user'])
@@ -73,6 +94,17 @@ class TicketScanService
                     'reason' => 'Tampered QR code. Cryptographic signature verification failed.',
                     'ticket' => $ticket,
                 ];
+            }
+
+            // Tickets must be event-scoped. Only super_admin may scan a ticket that
+            // has no event_id (break-glass). authorizeScanner also allows super_admin
+            // early when an event_id is present.
+            if (! $ticket->event_id) {
+                if (! $scanner->hasRole('super_admin')) {
+                    throw new AuthorizationException('This ticket is not assigned to an event.');
+                }
+            } else {
+                $this->authorizeScanner($scanner, null, (int) $ticket->event_id);
             }
 
             // 4. Check for Wrong Event
@@ -243,29 +275,26 @@ class TicketScanService
      */
     protected function authorizeScanner(User $scanner, ?int $venueId = null, ?int $eventId = null): void
     {
-        if ($scanner->hasRole('super-admin')) {
+        if ($scanner->hasRole('super_admin')) {
             return;
         }
 
-        // Venue-scoped permission
-        if ($venueId) {
-            $venue = Venue::find($venueId);
-            if ($venue && $venue->isStaff($scanner)) {
-                return;
-            }
+        if ($eventId === null && $venueId === null) {
+            throw new AuthorizationException('A scanner must be assigned to the event or venue being scanned.');
         }
 
-        // Event-scoped permission
         if ($eventId) {
-            $event = Event::find($eventId);
+            $event = Event::query()->with('venue')->find($eventId);
             if ($event && ($event->organizer_id === $scanner->id || ($event->venue && $event->venue->isStaff($scanner)))) {
                 return;
             }
         }
 
-        // General staff check
-        if ($scanner->hasRole(['organizer', 'referee'])) {
-            return;
+        if ($venueId) {
+            $venue = Venue::find($venueId);
+            if ($venue && $venue->isStaff($scanner)) {
+                return;
+            }
         }
 
         throw new AuthorizationException('You are not authorized to scan tickets for this venue or event.');

@@ -3,9 +3,11 @@
 namespace App\Domain\Notifications\Services;
 
 use App\Domain\Notifications\Models\NotificationPreference;
+use App\Domain\Notifications\Notifications\GenericNotification;
 use App\Models\User;
 use Illuminate\Notifications\Notification;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
 
 class NotificationService
 {
@@ -29,19 +31,35 @@ class NotificationService
             $user->notify($notification);
         }
 
-        // 2. Email channel abstraction
+        // 2. Email channel — prefer GenericNotification fields; otherwise use toArray.
         if ($prefs->email && $user->email) {
-            Log::info("Email notification queued for user {$user->id} ({$user->email}): {$eventType}");
+            $title = null;
+            $body = null;
+            if ($notification instanceof GenericNotification) {
+                $title = $notification->title;
+                $body = $notification->message;
+            } elseif (method_exists($notification, 'toArray')) {
+                $payload = $notification->toArray($user);
+                $title = is_array($payload) ? ($payload['title'] ?? null) : null;
+                $body = is_array($payload) ? ($payload['message'] ?? null) : null;
+            }
+
+            if (is_string($title) && $title !== '' && is_string($body)) {
+                Mail::raw(
+                    $title."\n\n".$body,
+                    function ($message) use ($user, $title): void {
+                        $message->to($user->email)->subject($title);
+                    }
+                );
+            }
         }
 
-        // 3. SMS channel abstraction (e.g. for urgent match / verification alerts)
         if ($prefs->sms && $user->phone) {
-            Log::info("SMS notification queued for user {$user->id} ({$user->phone}): {$eventType}");
+            Log::info("SMS provider is not configured for user {$user->id} event {$eventType}.");
         }
 
-        // 4. Push channel abstraction (FCM / WebPush)
         if ($prefs->push) {
-            Log::info("Push notification queued for user {$user->id}: {$eventType}");
+            Log::info("Push provider is not configured for user {$user->id} event {$eventType}.");
         }
     }
 }
